@@ -72,12 +72,21 @@ def prepare_buy_sell_actions(data):
     )
     data['action'] = data['action'].fillna(-1)
 
+    data['action_timestamp'] = pd.NA
+    data.loc[(data['action'] != pd.NA), 'action_timestamp'] = data['date'] + pd.Timedelta(days=2)
+
     return data
 
 
 def show_charts(data):
     buy_signals = data[data['action'] == 'buy']
     sell_signals = data[data['action'] == 'sell']
+
+    # remove sell signals if they are before buy signals
+    idx = 0
+    while sell_signals.iloc[idx]['action_timestamp'] < buy_signals.iloc[0]['action_timestamp']:
+        sell_signals = sell_signals.iloc[1:]
+        idx += 1
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -88,7 +97,7 @@ def show_charts(data):
     )
 
     fig.add_trace(go.Candlestick(
-        x=data['date'],
+        x=data['action_timestamp'],
         open=data['open'],
         high=data['high'],
         low=data['low'],
@@ -98,7 +107,7 @@ def show_charts(data):
 
     # todo: extract to single method traces below
     fig.add_trace(go.Scatter(
-        x=buy_signals['date'],
+        x=buy_signals['action_timestamp'],
         y=buy_signals['low'] - 10,  # Place buy marker slightly below the low of the candle for better observability
         mode='markers',
         marker=dict(symbol='triangle-up', color='green', size=15),
@@ -106,7 +115,7 @@ def show_charts(data):
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
-        x=sell_signals['date'],
+        x=sell_signals['action_timestamp'],
         y=sell_signals['low'] - 10,  # Place buy marker slightly below the low of the candle
         mode='markers',
         marker=dict(symbol='triangle-up', color='red', size=15),
@@ -146,26 +155,68 @@ def main(stock_data_file_name: str, roc_window: int, start_date: str, end_date: 
 
     show_charts(data)
 
+    buy_prices = []
+    sell_prices = []
+    trades = []
+    total_profit = 0
 
-main('./resources/AAPL.csv', 14, start_date='2022-01-01', end_date='2024-12-31')
+    is_open_position = False
 
-# todo: move to its own method calculate profit
-# buy_prices = []
-# sell_prices = []
+    # todo: create a separate method for calculation
+    for index, row in data.iterrows():
+        if row['action'] == 'buy':
+            buy_price = row['close']
+            buy_prices.append(buy_price)
+            trades.append(
+                {
+                    'action': 'buy',
+                    'timestamp': row['action_timestamp'],
+                    'price': buy_price,
+                    'status': 'OPEN'
+                }
+            )
+            is_open_position = True
+        elif row['action'] == 'sell' and is_open_position:
+            sell_price = row['close']
+            sell_prices.append(sell_price)
 
-# how much to buy?
-# how many assets at close price?
+            profit = 0
+            for trade in trades:
+                if trade['status'] == 'OPEN':
+                    profit = sell_price - trade['price']
+                    profit += profit
+                    trade['status'] = 'CLOSED'
 
-# for index, row in data.iterrows():
-#     if row['action'] == 'buy':
-#         buy_price = row['close']
-#         buy_prices.append(buy_price)
-#     elif row['action'] == 'sell':
-#         sell_price = row['close']
-#         sell_prices.append(sell_price)
-#
-# result = sum(buy_prices) - sum(sell_prices)
+            total_profit += profit
+
+            trades.append(
+                {'action': 'sell',
+                 'timestamp': row['timestamp'],
+                 'price': sell_price,
+                 'profit': profit,
+                 'status': 'CLOSED'
+                 }
+            )
+            is_open_position = False
+
+    # we can buy multiple times, but sell only once
+
+    win_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] > 0]
+    loss_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] <= 0]
+
+    total_trades = len([trade for trade in trades if 'profit' in trade])
+
+    win_rate = (len(win_trades) / total_trades) * 100
+
+    average_profit = total_profit / total_trades
+
+    print(f"Total Profit: {total_profit:.2f}")
+    print(f"Total Trades: {total_trades}")
+    print(f"Win Rate: {win_rate:.2f}%")
+    print(f"Average Profit per Trade: {average_profit:.2f}")
+    print(f"Number of Wins: {len(win_trades)}, Number of Losses: {len(loss_trades)}")
+
+    # todo: update readme
 
 
-# TODO: calculate returns
-# TODO: when to start and how much to invest?
+main('./resources/AAPL.csv', 14, start_date='2000-01-01', end_date='2024-12-31')
