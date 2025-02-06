@@ -7,7 +7,7 @@ from datetime import datetime
 from ta.momentum import ROCIndicator
 
 
-def parseData(file_name: str):
+def parseData(file_name: str, start_date: str):
     historical_data = []
 
     with open(file_name, 'r') as f:
@@ -16,7 +16,7 @@ def parseData(file_name: str):
             timestamp = row['datetime'].split(" ")[0]
             timestamp = datetime.strptime(timestamp, '%Y-%m-%d')  # skip time
 
-            if timestamp > datetime.fromisoformat('1999-01-01'):
+            if timestamp > datetime.fromisoformat(start_date):
                 historical_data.append({
                     'timestamp': timestamp,
                     'open': float(row['open']),
@@ -78,9 +78,14 @@ def prepare_buy_sell_actions(data):
     return data
 
 
-def show_charts(data):
+def show_charts(data, trades):
     buy_signals = data[data['action'] == 'buy']
     sell_signals = data[data['action'] == 'sell']
+
+    my_buys = [trade['timestamp'] for trade in trades if trade['action'] == 'buy']
+    my_sells = [trade['timestamp'] for trade in trades if trade['action'] == 'sell']
+    my_buys = buy_signals[buy_signals['action_timestamp'].isin(my_buys)]
+    my_sells = sell_signals[sell_signals['action_timestamp'].isin(my_sells)]
 
     # remove sell signals if they are before buy signals
     idx = 0
@@ -105,7 +110,6 @@ def show_charts(data):
         name='Close Price'
     ), row=1, col=1)
 
-    # todo: extract to single method traces below
     fig.add_trace(go.Scatter(
         x=buy_signals['action_timestamp'],
         y=buy_signals['low'] - 10,  # Place buy marker slightly below the low of the candle for better observability
@@ -120,6 +124,22 @@ def show_charts(data):
         mode='markers',
         marker=dict(symbol='triangle-up', color='red', size=15),
         name='Sell Signal'
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=my_buys['action_timestamp'],
+        y=my_buys['low'] - 20,
+        mode='markers',
+        marker=dict(symbol='cross-open', color='green', size=10),
+        name='Trade Opened'
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=my_sells['action_timestamp'],
+        y=my_sells['low'] - 20,
+        mode='markers',
+        marker=dict(symbol='cross', color='black', size=10),
+        name='Trade Closed'
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
@@ -145,16 +165,7 @@ def show_charts(data):
     fig.show()
 
 
-def main(stock_data_file_name: str, roc_window: int, start_date: str, end_date: str):
-    data = parseData(stock_data_file_name)
-
-    data = get_roc_indicator(data, roc_window)
-    data = data.loc[start_date:end_date]
-    data = prepare_buy_sell_signals(data)
-    data = prepare_buy_sell_actions(data)
-
-    show_charts(data)
-
+def calculate_statistics(data):
     buy_prices = []
     sell_prices = []
     trades = []
@@ -162,11 +173,11 @@ def main(stock_data_file_name: str, roc_window: int, start_date: str, end_date: 
 
     is_open_position = False
 
-    # todo: create a separate method for calculation
     for index, row in data.iterrows():
         if row['action'] == 'buy':
             buy_price = row['close']
             buy_prices.append(buy_price)
+
             trades.append(
                 {
                     'action': 'buy',
@@ -183,40 +194,60 @@ def main(stock_data_file_name: str, roc_window: int, start_date: str, end_date: 
             profit = 0
             for trade in trades:
                 if trade['status'] == 'OPEN':
-                    profit = sell_price - trade['price']
-                    profit += profit
+                    profit += (sell_price - trade['price'])
                     trade['status'] = 'CLOSED'
 
-            total_profit += profit
-
             trades.append(
-                {'action': 'sell',
-                 'timestamp': row['timestamp'],
-                 'price': sell_price,
-                 'profit': profit,
-                 'status': 'CLOSED'
-                 }
+                {
+                    'action': 'sell',
+                    'timestamp': row['action_timestamp'],
+                    'price': sell_price,
+                    'profit': profit,
+                    'status': 'CLOSED_ALL'
+                }
             )
+            total_profit += profit
             is_open_position = False
-
-    # we can buy multiple times, but sell only once
 
     win_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] > 0]
     loss_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] <= 0]
-
     total_trades = len([trade for trade in trades if 'profit' in trade])
-
     win_rate = (len(win_trades) / total_trades) * 100
-
     average_profit = total_profit / total_trades
+
+    buy_orders = [trade for trade in trades if trade['action'] == 'buy']
+    sell_orders = [trade for trade in trades if trade['action'] == 'sell']
+
+    # todo: rearrange prints
+    print(f"Buy orders: {len(buy_orders)}, Sell orders: {len(sell_orders)}")
 
     print(f"Total Profit: {total_profit:.2f}")
     print(f"Total Trades: {total_trades}")
+
     print(f"Win Rate: {win_rate:.2f}%")
     print(f"Average Profit per Trade: {average_profit:.2f}")
     print(f"Number of Wins: {len(win_trades)}, Number of Losses: {len(loss_trades)}")
+    print(f"Win/Loss Rate: {len(win_trades) / len(loss_trades)}")
 
-    # todo: update readme
+    return trades
 
 
-main('./resources/AAPL.csv', 14, start_date='2000-01-01', end_date='2024-12-31')
+def main(stock_data_file_name: str, roc_window: int, start_date: str, end_date: str):
+    data = parseData(stock_data_file_name, start_date)
+    data = get_roc_indicator(data, roc_window)
+    data = data.loc[start_date:end_date]
+    data = prepare_buy_sell_signals(data)
+    data = prepare_buy_sell_actions(data)
+
+    trades = calculate_statistics(data)
+    show_charts(data, trades)
+
+
+# todo: add parameter to smooth ROC by MA
+# so test just with 2 parameters
+main(
+    './resources/AAPL.csv',
+    14,
+    start_date='2014-01-01',
+    end_date='2024-12-31'
+)
