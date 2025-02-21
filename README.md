@@ -165,3 +165,8 @@ Number of Wins: 28, Number of Losses: 17
 - **Total Profit**: Represents the overall performance. A positive total profit is an indicator of success.
 - **Average Profit per Trade**: This should ideally be positive. A higher average profit suggests the strategy's
   efficiency.
+
+### Sources
+
+1. https://chartschool.stockcharts.com/table-of-contents/technical-indicators-and-overlays/technical-indicators/rate-of-change-roc
+2. https://tradeciety.com/how-to-use-moving-averages

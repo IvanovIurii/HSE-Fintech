@@ -5,6 +5,7 @@ from plotly.subplots import make_subplots
 import pandas as pd
 from datetime import datetime
 from ta.momentum import ROCIndicator
+from ta.trend import sma_indicator
 
 
 def parseData(file_name: str, start_date: str):
@@ -17,15 +18,14 @@ def parseData(file_name: str, start_date: str):
             timestamp = row['datetime'].split(" ")[0]
             timestamp = datetime.strptime(timestamp, '%Y-%m-%d')  # skip time
 
-            if timestamp > datetime.fromisoformat(start_date):
-                historical_data.append({
-                    'timestamp': timestamp,
-                    'open': float(row['open']),
-                    'high': float(row['high']),
-                    'low': float(row['low']),
-                    'close': float(row['close']),
-                    'volume': float(row['volume'])
-                })
+            historical_data.append({
+                'timestamp': timestamp,
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': float(row['volume'])
+            })
 
     data = pd.DataFrame(historical_data)
     data.set_index('timestamp', inplace=True)
@@ -34,9 +34,10 @@ def parseData(file_name: str, start_date: str):
     return data
 
 
-def get_roc_indicator(data, roc_window: int):
+def get_smoothed_roc_indicator(data, roc_window: int, sma_window: int):
     """Add the Rate-of-Change (ROC) indicator column."""
     data['roc'] = ROCIndicator(data['close'], window=roc_window).roc()
+    data['roc'] = sma_indicator(data['roc'], window=sma_window)
 
     return data
 
@@ -50,10 +51,11 @@ def prepare_buy_sell_signals(data):
     return data
 
 
-def prepare_buy_sell_actions(data):
+def prepare_buy_sell_actions(data, exit):
     """
     Group consecutive signals and assign an action when the group lasts for more than 2 bars.
     The trade is executed 2 days after the signal.
+    The sell happens after exit amount of bars.
     """
     data['group'] = (data['signal'] != data['signal'].shift(1)).cumsum()
 
@@ -62,13 +64,9 @@ def prepare_buy_sell_actions(data):
         count=('signal', 'size')
     ).reset_index()
 
-    # On signal wait:
-    # buy when 2 bars after the signal;
-    # sell after 2 bars after the signal.
     grouped_data['action'] = pd.NA
     grouped_data.loc[(grouped_data['count'] > 2) & (grouped_data['signal'] == 1), 'action'] = 'buy'
-    # sell after 5 10 15 20
-    grouped_data.loc[(grouped_data['count'] > 2) & (grouped_data['signal'] == -1), 'action'] = 'sell'
+    grouped_data.loc[(grouped_data['count'] > exit) & (grouped_data['signal'] == -1), 'action'] = 'sell'
 
     grouped_data_to_merge = pd.DataFrame(grouped_data.to_dict(orient='records'))
 
@@ -81,26 +79,19 @@ def prepare_buy_sell_actions(data):
     data['action'] = data['action'].fillna(-1)
 
     data['action_timestamp'] = pd.NA
-    data.loc[(data['action'] != pd.NA), 'action_timestamp'] = data['date'] + pd.Timedelta(days=2)
+    data.loc[(data['action'] != pd.NA), 'action_timestamp'] = data['date'].shift(-exit)
 
     return data
 
 
 # (Optional) Chart function remains available if you wish to visualize any specific run
-def show_charts(data, trades):
+def show_charts(data):
     buy_signals = data[data['action'] == 'buy']
     sell_signals = data[data['action'] == 'sell']
 
-    my_buys = [trade['timestamp'] for trade in trades if trade['action'] == 'buy']
-    my_sells = [trade['timestamp'] for trade in trades if trade['action'] == 'sell']
-    my_buys = buy_signals[buy_signals['action_timestamp'].isin(my_buys)]
-    my_sells = sell_signals[sell_signals['action_timestamp'].isin(my_sells)]
-
     # remove sell signals if they are before buy signals
-    idx = 0
-    while sell_signals.iloc[idx]['action_timestamp'] < buy_signals.iloc[0]['action_timestamp']:
+    while sell_signals.iloc[0]['action_timestamp'] < buy_signals.iloc[0]['action_timestamp']:
         sell_signals = sell_signals.iloc[1:]
-        idx += 1
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -133,22 +124,6 @@ def show_charts(data, trades):
         mode='markers',
         marker=dict(symbol='triangle-up', color='red', size=15),
         name='Sell Signal'
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=my_buys['action_timestamp'],
-        y=my_buys['low'] - 20,
-        mode='markers',
-        marker=dict(symbol='cross-open', color='green', size=10),
-        name='Trade Opened'
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=my_sells['action_timestamp'],
-        y=my_sells['low'] - 20,
-        mode='markers',
-        marker=dict(symbol='cross', color='black', size=10),
-        name='Trade Closed'
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
@@ -203,7 +178,8 @@ def calculate_statistics(data):
             profit = 0
             for trade in trades:
                 if trade['status'] == 'OPEN':
-                    profit += (sell_price - trade['price'])
+                    trade_profit = (sell_price - trade['price'])
+                    profit += trade_profit
                     trade['status'] = 'CLOSED'
 
             trades.append(
@@ -218,14 +194,17 @@ def calculate_statistics(data):
             total_profit += profit
             is_open_position = False
 
-    win_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] > 0]
-    loss_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] <= 0]
-    total_trades = len([trade for trade in trades if 'profit' in trade])
-    win_rate = (len(win_trades) / total_trades) * 100
-    average_profit = total_profit / total_trades
-
     buy_orders = [trade for trade in trades if trade['action'] == 'buy']
     sell_orders = [trade for trade in trades if trade['action'] == 'sell']
+
+    win_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] > 0]
+    loss_trades = [trade for trade in trades if 'profit' in trade and trade['profit'] <= 0]
+
+    total_trades = len(buy_orders + sell_orders)
+
+    win_rate = (len(win_trades) / len(win_trades + loss_trades)) * 100
+    average_profit = total_profit / len([trade for trade in trades if 'profit' in trade])
+
     win_loss_ration = len(win_trades) / len(loss_trades) if loss_trades else 0
 
     # todo: use this to round all the floats inside the DF
@@ -242,66 +221,66 @@ def calculate_statistics(data):
         'sell_orders': len(sell_orders),
     }
 
-    return stats, trades
+    return stats
 
 
 def print_stats(stats: dict):
-    # todo: rearrange prints
-    print(f"Buy orders: {stats['buy_orders']}, Sell orders: {stats['sell_orders']}")
-
-    print(f"Total Profit: {stats['total_profit']:.2f}")
     print(f"Total Trades: {stats['total_trades']}")
-
-    print(f"Win Rate: {stats['win_rate']:.2f}%")
+    print(f"Total Profit: {stats['total_profit']:.2f}")
     print(f"Average Profit per Trade: {stats['average_profit']:.2f}")
+    print(f"Win Rate: {stats['win_rate']:.2f}%")
     print(f"Number of Wins: {stats['wins']}, Number of Losses: {stats['losses']}")
-    if stats['win_loss_ration']:
-        print(f"Win/Loss Ratio: {stats['win_loss_ration']:.2f}")
+
+    if stats['win_loss_ratio'] != '0.00':
+        print(f"Win/Loss Ratio: {stats['win_loss_ratio']}")
     else:
         print("No Loss Trades.")
 
 
-def backtest_single_run(stock_data_file_name: str, roc_window: int, start_date: str, end_date: str):
+def backtest_single_run(stock_data_file_name: str, roc_window: int, sma_window: int, exit: int, start_date: str,
+                        end_date: str):
     data = parseData(stock_data_file_name, start_date)
-    data = get_roc_indicator(data, roc_window)
+    data = get_smoothed_roc_indicator(data, roc_window, sma_window)
     data = data.loc[start_date:end_date]
     data = prepare_buy_sell_signals(data)
-    data = prepare_buy_sell_actions(data)
+    data = prepare_buy_sell_actions(data, exit)
 
-    stats, trades = calculate_statistics(data)
+    stats = calculate_statistics(data)
     print_stats(stats)
 
-    show_charts(data, trades)
+    show_charts(data)
 
 
-# todo: add parameter to smooth ROC by MA
-# so test just with 2 parameters
 def backtest(stock_data_file_name: str, start_date: str, end_date: str):
-    """
-    Run the strategy for all ROC window values from 10 to 30 and build a Pandas DataFrame
-    with summary statistics for each case.
-    """
-    # todo: add SMA window as a second loop
-    # todo: add exit strategy 5/10/15/20 bars
-    # NOTE: the enter is the same always 2 bars after buy signal
     results = []
-    for roc_window in range(10, 31):
-        # Load and process the data for the given ROC window
-        data = parseData(stock_data_file_name, start_date)
-        data = get_roc_indicator(data, roc_window)
-        data = data.loc[start_date:end_date]
-        data = prepare_buy_sell_signals(data)
-        data = prepare_buy_sell_actions(data)
+    for roc_window in range(10, 31):  # ROC Window
+        for sma_window in [100, 250]:  # SMA Window
+            for exit in [5, 10, 15, 20]:  # Exit
+                data = parseData(stock_data_file_name, start_date)
+                data = get_smoothed_roc_indicator(data, roc_window, sma_window)
+                data = data.loc[start_date:end_date]
+                data = prepare_buy_sell_signals(data)
+                data = prepare_buy_sell_actions(data, exit)
 
-        stats, _ = calculate_statistics(data)
-        stats['roc_window'] = roc_window
-        results.append(stats)
+                stats = calculate_statistics(data)
+                stats['roc_window'] = roc_window
+                stats['sma_window'] = sma_window
+                stats['exit'] = exit
+
+                if stats['total_trades'] >= 30:
+                    results.append(stats)
+
+    if not results:
+        print("No results with more than 30 trades")
+        return
 
     table = pd.DataFrame(results)
     print("\n=== Backtest Summary for All ROC Windows ===")
 
     print(table[[
         'roc_window',
+        'exit',
+        'sma_window',
         'buy_orders',
         'total_trades',
         'wins',
@@ -310,9 +289,11 @@ def backtest(stock_data_file_name: str, start_date: str, end_date: str):
         'total_profit',
         'win_loss_ratio']])
 
+    print(table.head())
+    print("Number of rows:", len(table))
     max_row = table.loc[table['win_loss_ratio'].idxmax()]
 
-    # now with this values we can run a single strategy to see the charts
+    # now with this values we can run a single strategy to see the chart
     print("\nMax Win Loss Ratio:")
     print(max_row)
 
@@ -321,18 +302,28 @@ def backtest(stock_data_file_name: str, start_date: str, end_date: str):
 
 if __name__ == "__main__":
     # Define parameters (adjust these paths and dates as needed)
-    stock_data_file_name = './resources/AAPL.csv'
-    start_date = '2014-01-01'
-    end_date = '2024-12-31'
+    stock_data_file_name = './resources/LKOH.csv'
+    start_date = '2018-01-01'
+    end_date = '2024-08-31'
 
-    result = backtest(stock_data_file_name, start_date, end_date)
+    # TO BACKTEST TO FIND PARAMETERS
+    # start_date = '2000-01-01'
+    # end_date = '2018-01-01'
+
+    # TO CHECK ON PAPER
+    # start_date = '2018-01-01'
+    # end_date = '2024-08-31'
+
+    # result = backtest(stock_data_file_name, start_date, end_date)
 
     # Optional:
     # if you need to check single result with defined parameters and chars
     # to visualize this specific run, for example roc_window=14:
-    # backtest_single_run(
-    #     stock_data_file_name=stock_data_file_name,
-    #     roc_window=14,
-    #     start_date=start_date,
-    #     end_date=end_date
-    # )
+    backtest_single_run(
+        stock_data_file_name=stock_data_file_name,
+        roc_window=21,
+        sma_window=100,
+        exit=10,
+        start_date=start_date,
+        end_date=end_date
+    )
